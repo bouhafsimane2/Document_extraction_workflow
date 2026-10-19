@@ -1,0 +1,1733 @@
+{
+  "id": "docExtractMain01",
+  "name": "Document Extraction - Multi-type Inbox",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## Extraction de documents (multi-types)\nAvant la 1re exécution :\n1. Credentials : **IMAP** (trigger), **Groq account** (3 nœuds *Groq Model*), **Supabase API** (6 nœuds *Supabase* : Host `https://<ref>.supabase.co` + clé `service_role`), **SMTP** (email de revue)\n2. Adapter le bloc CONFIG du nœud *Config and Normalize* (URL OCR, email de revue, seuil) ; modèle LLM dans *Groq Chat Model*\n3. Settings du workflow → Error workflow = *Document Extraction - Error Alert*\n4. Exécuter `sql/schema.sql` dans Supabase → SQL Editor",
+        "width": 560,
+        "height": 260,
+        "color": 4
+      },
+      "id": "bfe91d14-d1a2-4de6-818c-03ec9c52bc52",
+      "name": "Note d0d36b",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -420,
+        -340
+      ]
+    },
+    {
+      "parameters": {
+        "mailbox": "INBOX",
+        "postProcessAction": "read",
+        "downloadAttachments": true,
+        "format": "simple",
+        "options": {
+          "customEmailConfig": "[\"UNSEEN\"]"
+        }
+      },
+      "id": "9e7dd76f-de8c-4273-98b0-7f8ebfedfa90",
+      "name": "Email Trigger (IMAP)",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [
+        0,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ====== CONFIGURATION — à adapter ======\nconst CFG = {\n  // Modèle LLM : nœuds « Groq Chat Model ». Prompts : nœuds Text Classifier / Information Extractor.\n  ocr_url: 'http://127.0.0.1:8001/ocr',  // 127.0.0.1 et non localhost (Node résout localhost en ::1)\n  review_email: 'review@test.local',\n  from_email: 'n8n-extraction@test.local',\n  min_text_chars: 40,          // en dessous : PDF considéré comme scanné -> OCR\n  auto_approve_threshold: 0.8, // confiance minimale pour l'auto-approbation\n};\n// =======================================\n\nconst h = (v) => (Array.isArray(v) ? v.join(',') : (v ?? '')).toString().trim();\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  const meta = j.metadata || {};\n  const binary = item.binary || {};\n  const attKeys = Object.keys(binary).filter((k) => k.startsWith('attachment_'));\n  const messageId = h(meta['message-id'] || j.messageId || j['message-id']);\n  out.push({\n    json: {\n      email_id: messageId || `${h(j.from)}|${h(j.subject)}|${h(j.date)}`,\n      sender: h(j.from),\n      subject: h(j.subject),\n      email_date: h(j.date) || null,\n      body_snippet: h(j.textPlain || j.text).slice(0, 500),\n      attachment_count: attKeys.length,\n      attachment_names: attKeys.map((k) => binary[k].fileName || k),\n      test_case_id: h(meta['x-test-case-id']) || null,\n      test_run_id: h(meta['x-test-run-id']) || null,\n      cfg: CFG,\n    },\n    binary,\n  });\n}\nreturn out;\n"
+      },
+      "id": "eaef4591-9fc6-40a8-bfc6-bf8288810e4a",
+      "name": "Config and Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "inputText": "={{ 'Objet : ' + $json.subject + '\\nExpéditeur : ' + $json.sender + '\\nPièces jointes (' + $json.attachment_count + ') : ' + ($json.attachment_names || []).join(', ') + '\\nExtrait du corps : ' + ($json.body_snippet || '(vide)').slice(0, 300) }}",
+        "categories": {
+          "categories": [
+            {
+              "category": "relevant",
+              "description": "l'email contient probablement une facture, un reçu / ticket de caisse, une fiche fournisseur, un manuel technique ou un autre document métier à traiter"
+            },
+            {
+              "category": "not_relevant",
+              "description": "newsletter, promotion, publicité, message personnel, invitation, notification sans document métier"
+            }
+          ]
+        },
+        "options": {
+          "fallback": "other",
+          "systemPromptTemplate": "Tu tries la boîte mail du service maintenance / achats d'une entreprise de tramway. Classe l'email (objet, expéditeur, noms des pièces jointes, extrait du corps) dans une des catégories : {categories}. Ne donne aucune explication, réponds uniquement avec le JSON demandé.",
+          "enableAutoFixing": true,
+          "batching": {
+            "batchSize": 2,
+            "delayBetweenBatches": 12000
+          }
+        }
+      },
+      "id": "f408c160-040e-495e-b0d3-52f24793b304",
+      "name": "Relevance Filter",
+      "type": "@n8n/n8n-nodes-langchain.textClassifier",
+      "typeVersion": 1.1,
+      "position": [
+        440,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-20b",
+        "options": {
+          "temperature": 0,
+          "maxTokensToSample": 1024
+        }
+      },
+      "id": "4f53a496-a1bf-415e-8213-9404ec0e30c7",
+      "name": "Groq Model - Filter",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        460,
+        540
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c77e97a6-5352-4d4d-a708-eeb36882a509",
+              "leftValue": "={{ $json.attachment_count }}",
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              },
+              "rightValue": 0
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "e833c51d-5b37-4117-8bfd-9d6e947fb220",
+      "name": "IF Has Attachments",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        880,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Step 2a — une ligne email_log (uniquement les colonnes de la table : auto-map Supabase)\nconst reason = $json.attachment_count === 0 ? 'aucune pièce jointe' : 'classé non pertinent par le LLM';\nreturn { json: {\n  email_id: $json.email_id,\n  sender: $json.sender,\n  subject: $json.subject,\n  attachment_count: $json.attachment_count,\n  status: 'skipped',\n  reason: 'filtered as irrelevant: ' + reason,\n  test_case_id: $json.test_case_id ?? null,\n  test_run_id: $json.test_run_id ?? null,\n} };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "9eb6de60-3041-4115-8924-0e55d3b6ee9c",
+      "name": "Mark Skipped",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        880,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "email_log",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": ""
+      },
+      "id": "fccdd34f-9b9a-41f3-be00-17bfe1c0b6ed",
+      "name": "Supabase: email_log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        520
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Step 3 — une sortie par pièce jointe (Split Out ne sait pas éclater les binaires, d'où ce Code node)\nconst out = [];\n$input.all().forEach((item, i) => {\n  const { attachment_names, ...email } = item.json;\n  const bin = item.binary || {};\n  Object.keys(bin).filter((k) => k.startsWith('attachment_')).forEach((k, idx) => {\n    const b = bin[k];\n    const file_name = b.fileName || k;\n    const ext = (b.fileExtension || file_name.split('.').pop() || '').toLowerCase();\n    const mime = (b.mimeType || '').toLowerCase();\n    let file_kind = 'other';\n    if (mime === 'application/pdf' || ext === 'pdf') file_kind = 'pdf';\n    else if (mime.startsWith('image/') || ['png', 'jpg', 'jpeg', 'tif', 'tiff', 'bmp', 'webp'].includes(ext)) file_kind = 'image';\n    else if (mime.startsWith('text/') || ['txt', 'csv', 'md'].includes(ext)) file_kind = 'text';\n    out.push({\n      json: { ...email, attachment_id: `${email.email_id}#${idx}`, attachment_index: idx,\n              file_name, mime_type: mime, file_kind, file_size: b.fileSize || null },\n      binary: { data: b },\n      pairedItem: { item: i },\n    });\n  });\n});\nreturn out;\n"
+      },
+      "id": "9e7e29de-d841-481e-9bd2-c61098e13abb",
+      "name": "Split Attachments",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "5e8eeae0-9938-4a34-bb3c-ae263fa0cb35",
+                    "leftValue": "={{ $json.file_kind }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "pdf"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "pdf"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "a68cefb2-4ab8-49ce-9cfa-0aae420e8807",
+                    "leftValue": "={{ $json.file_kind }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "image"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "image"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "c71f590f-f018-4207-96a7-a4e00de71f0f",
+                    "leftValue": "={{ $json.file_kind }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "text"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "text"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "6afe3e99-2e08-43a9-af73-d5aa4bd7f1f9",
+                    "leftValue": "={{ $json.file_kind }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "other"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "other"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11c67b1b-38b6-478d-931a-cd16f84e7b7e",
+      "name": "Switch File Kind",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        1320,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "pdf",
+        "binaryPropertyName": "data",
+        "options": {}
+      },
+      "id": "f8cfb1ac-8ece-4b75-b379-6e8846605451",
+      "name": "Extract PDF Text",
+      "type": "n8n-nodes-base.extractFromFile",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        0
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Split Attachments').item;\nconst raw = $json.text || '';\nconst needs_ocr = raw.replace(/\\s+/g, '').length < src.json.cfg.min_text_chars;\nreturn {\n  json: { ...src.json, text: needs_ocr ? '' : raw, page_count_detected: $json.numpages ?? null,\n          text_source: needs_ocr ? 'pending_ocr' : 'pdf_text_layer', needs_ocr },\n  binary: src.binary,\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "ab6d39e1-e6e0-43fd-b053-9f1633b36f78",
+      "name": "Check Text Layer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1760,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "550fdd1d-b8a6-42a9-ab60-09fc0a812c15",
+              "leftValue": "={{ $json.needs_ocr }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "ecbe6398-d950-47fd-a5b3-e9132304706a",
+      "name": "IF Needs OCR",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1980,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.cfg.ocr_url }}",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "file",
+              "inputDataFieldName": "data"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 300000
+        }
+      },
+      "id": "f7095f20-d672-4a9e-aa9a-d771a9d17fec",
+      "name": "OCR Service",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2200,
+        220
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const src = $('Split Attachments').item;\nreturn {\n  json: { ...src.json, text: $json.text || '', text_source: 'ocr:' + ($json.engine || 'unknown'),\n          page_count_detected: $json.pages ?? null },\n  binary: src.binary,\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "b150e5c2-9679-4220-bf2e-28aacf799952",
+      "name": "Attach OCR Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2420,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const out = [];\nconst items = $input.all();\nfor (let i = 0; i < items.length; i++) {\n  const buf = await this.helpers.getBinaryDataBuffer(i, 'data');\n  out.push({ json: { ...items[i].json, text: buf.toString('utf8'), text_source: 'plain_text', page_count_detected: null },\n             binary: items[i].binary, pairedItem: { item: i } });\n}\nreturn out;\n"
+      },
+      "id": "67acc18b-42e4-4ba2-b37f-30e94bc9a0f1",
+      "name": "Read Text File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        380
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { text, ...rest } = $json;\nreturn { json: { ...rest, final_status: 'unsupported_format', review_mode: 'none', doc_type: 'unsupported', extracted: {}, validation: { passed: false, errors: ['format non supporté : ' + $json.mime_type] } } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "bf39f55d-ee1e-4d14-85e1-a33e8d6b0688",
+      "name": "Mark Unsupported",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1540,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Point de convergence des 3 chemins (PDF texte / OCR / fichier texte)\nconst text = ($json.text || '').trim();\nreturn { json: { ...$json, text, text_chars: text.length }, binary: $input.item.binary };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "7fb2c544-1de1-4832-b5ed-8b8797118d04",
+      "name": "Document Ready",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2640,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "inputText": "={{ 'Nom du fichier : ' + $json.file_name + '\\n\\nTexte du document :\\n' + ($json.text || '(aucun texte extrait)').slice(0, 3000) }}",
+        "categories": {
+          "categories": [
+            {
+              "category": "invoice",
+              "description": "facture fournisseur, ticket de caisse, reçu : tout document qui réclame ou atteste un paiement"
+            },
+            {
+              "category": "supplier_sheet",
+              "description": "fiche de présentation / référencement d'un fournisseur : coordonnées, contact, produits proposés"
+            },
+            {
+              "category": "manual",
+              "description": "manuel technique, notice, procédure de maintenance d'un équipement"
+            },
+            {
+              "category": "irrelevant",
+              "description": "publicité, newsletter, message personnel, invitation, article, tout autre document"
+            }
+          ]
+        },
+        "options": {
+          "fallback": "other",
+          "systemPromptTemplate": "Classe le document (texte éventuellement issu d'un OCR bruité, dans n'importe quelle langue) dans UNE des catégories : {categories}. Ne donne aucune explication, réponds uniquement avec le JSON demandé.",
+          "enableAutoFixing": true,
+          "batching": {
+            "batchSize": 2,
+            "delayBetweenBatches": 30000
+          }
+        }
+      },
+      "id": "7ea8d295-60a8-43a6-8113-36b5fa508471",
+      "name": "Classify Document",
+      "type": "@n8n/n8n-nodes-langchain.textClassifier",
+      "typeVersion": 1.1,
+      "position": [
+        2860,
+        100
+      ],
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-20b",
+        "options": {
+          "temperature": 0,
+          "maxTokensToSample": 1024
+        }
+      },
+      "id": "d973f32c-f6c1-4191-b547-b5f543ab903f",
+      "name": "Groq Model - Classify",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        2880,
+        640
+      ]
+    },
+    {
+      "parameters": {
+        "model": "openai/gpt-oss-120b",
+        "options": {
+          "temperature": 0,
+          "maxTokensToSample": 2048
+        }
+      },
+      "id": "3134fcfd-e596-439d-b14d-4573afa31ee6",
+      "name": "Groq Model - Extract",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGroq",
+      "typeVersion": 1,
+      "position": [
+        3180,
+        760
+      ]
+    },
+    {
+      "parameters": {
+        "text": "={{ 'Nom du fichier : ' + $json.file_name + '\\nNombre de pages détecté : ' + ($json.page_count_detected || 'inconnu') + '\\n\\nTexte du document :\\n' + ($json.text || '(aucun texte extrait)').slice(0, 6000) }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"vendor\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"société émettrice de la facture / du reçu\"\n    },\n    \"invoice_number\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"numéro de facture ou de reçu\"\n    },\n    \"date\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"date du document au format YYYY-MM-DD\"\n    },\n    \"line_items\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"object\",\n        \"properties\": {\n          \"description\": {\n            \"type\": [\n              \"string\",\n              \"null\"\n            ]\n          },\n          \"quantity\": {\n            \"type\": [\n              \"number\",\n              \"null\"\n            ]\n          },\n          \"unit_price\": {\n            \"type\": [\n              \"number\",\n              \"null\"\n            ]\n          },\n          \"amount\": {\n            \"type\": [\n              \"number\",\n              \"null\"\n            ]\n          }\n        }\n      }\n    },\n    \"subtotal\": {\n      \"type\": [\n        \"number\",\n        \"null\"\n      ],\n      \"description\": \"total hors taxes\"\n    },\n    \"tax\": {\n      \"type\": [\n        \"number\",\n        \"null\"\n      ],\n      \"description\": \"montant de taxe (TVA)\"\n    },\n    \"total\": {\n      \"type\": [\n        \"number\",\n        \"null\"\n      ],\n      \"description\": \"montant final payé TTC\"\n    },\n    \"currency\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"code ISO : EUR, DZD, MYR, IDR...\"\n    }\n  },\n  \"required\": [\n    \"vendor\",\n    \"invoice_number\",\n    \"date\",\n    \"line_items\",\n    \"subtotal\",\n    \"tax\",\n    \"total\",\n    \"currency\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "Tu extrais les données d'une facture fournisseur ou d'un reçu / ticket de caisse. Nombres : point décimal, sans séparateur de milliers (\"60.000\" IDR => 60000 ; \"2 150,00\" => 2150). total = montant final payé TTC ; subtotal = montant hors taxes. Mets null pour toute information absente, n'invente rien. Le texte peut venir d'un OCR bruité.",
+          "batching": {
+            "batchSize": 1,
+            "delayBetweenBatches": 30000
+          }
+        }
+      },
+      "id": "32c3bae8-7228-47d0-b2cc-30bd104a49b5",
+      "name": "Extract Invoice",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        3300,
+        -160
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "text": "={{ 'Nom du fichier : ' + $json.file_name + '\\nNombre de pages détecté : ' + ($json.page_count_detected || 'inconnu') + '\\n\\nTexte du document :\\n' + ($json.text || '(aucun texte extrait)').slice(0, 6000) }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"company_name\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"raison sociale du fournisseur\"\n    },\n    \"contact\": {\n      \"type\": \"object\",\n      \"properties\": {\n        \"name\": {\n          \"type\": [\n            \"string\",\n            \"null\"\n          ]\n        },\n        \"role\": {\n          \"type\": [\n            \"string\",\n            \"null\"\n          ]\n        },\n        \"email\": {\n          \"type\": [\n            \"string\",\n            \"null\"\n          ]\n        },\n        \"phone\": {\n          \"type\": [\n            \"string\",\n            \"null\"\n          ]\n        }\n      }\n    },\n    \"address\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"adresse postale complète\"\n    },\n    \"products_offered\": {\n      \"type\": \"array\",\n      \"items\": {\n        \"type\": \"string\"\n      },\n      \"description\": \"produits et services proposés\"\n    }\n  },\n  \"required\": [\n    \"company_name\",\n    \"contact\",\n    \"address\",\n    \"products_offered\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "Tu extrais les données d'une fiche de présentation / référencement fournisseur. Mets null pour toute information absente, n'invente rien. Le texte peut venir d'un OCR bruité.",
+          "batching": {
+            "batchSize": 1,
+            "delayBetweenBatches": 30000
+          }
+        }
+      },
+      "id": "ccc6aa89-338f-4d00-87c1-508176e63ece",
+      "name": "Extract Supplier Sheet",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        3300,
+        60
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "text": "={{ 'Nom du fichier : ' + $json.file_name + '\\nNombre de pages détecté : ' + ($json.page_count_detected || 'inconnu') + '\\n\\nTexte du document :\\n' + ($json.text || '(aucun texte extrait)').slice(0, 6000) }}",
+        "schemaType": "manual",
+        "inputSchema": "{\n  \"type\": \"object\",\n  \"properties\": {\n    \"title\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"titre du document\"\n    },\n    \"equipment_reference\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"uniquement le code modèle / référence de l'équipement, ex. PX-300, sans révision ni autre texte\"\n    },\n    \"page_count\": {\n      \"type\": [\n        \"integer\",\n        \"null\"\n      ],\n      \"description\": \"nombre de pages du document\"\n    },\n    \"summary\": {\n      \"type\": [\n        \"string\",\n        \"null\"\n      ],\n      \"description\": \"une phrase de résumé, pour l'indexation\"\n    }\n  },\n  \"required\": [\n    \"title\",\n    \"equipment_reference\",\n    \"page_count\",\n    \"summary\"\n  ]\n}",
+        "options": {
+          "systemPromptTemplate": "Tu extrais les métadonnées d'un manuel technique ou d'une notice d'équipement. Mets null pour toute information absente, n'invente rien. Le texte peut venir d'un OCR bruité.",
+          "batching": {
+            "batchSize": 1,
+            "delayBetweenBatches": 30000
+          }
+        }
+      },
+      "id": "560a4605-ee5f-4f33-a6f7-c26ba17fdfd4",
+      "name": "Extract Manual",
+      "type": "@n8n/n8n-nodes-langchain.informationExtractor",
+      "typeVersion": 1.2,
+      "position": [
+        3300,
+        280
+      ],
+      "onError": "continueRegularOutput",
+      "retryOnFail": true,
+      "maxTries": 5,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "const { text, ...rest } = $json;\nreturn { json: { ...rest, final_status: 'discarded_irrelevant', review_mode: 'none', doc_type: 'irrelevant', class_confidence: null, extracted: {} } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "24ebf9dc-9498-4a06-99a1-86e356cf243a",
+      "name": "Mark Discarded",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Text Classifier -> sortie « Other » : aucune catégorie claire -> revue humaine\nreturn {\n  json: { ...$json, doc_type: 'unknown', class_confidence: null, extracted: {}, confidence: 0,\n          validation: { passed: false, critical_failed: true, checks: [],\n                        errors: ['aucune catégorie claire (Text Classifier : Other)'] } },\n  binary: $input.item.binary,\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "f27d3bc2-8075-4bc8-9733-f62345267547",
+      "name": "Mark Unclassified",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3300,
+        620
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sortie de l'Information Extractor ({ output: {...} }) + contexte de la pièce jointe\nconst src = $('Document Ready').item;\nconst out = $json.output;\nconst ok = out && typeof out === 'object';\nreturn {\n  json: { ...src.json, doc_type: 'invoice', class_confidence: null, extracted: ok ? out : {},\n          extraction_parse_error: ok ? null : ('extraction impossible' + ($json.error ? ' : ' + $json.error : '')) },\n  binary: src.binary,\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "9aa11308-f288-479d-ae99-59891be2c94a",
+      "name": "Parse Invoice",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        -160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sortie de l'Information Extractor ({ output: {...} }) + contexte de la pièce jointe\nconst src = $('Document Ready').item;\nconst out = $json.output;\nconst ok = out && typeof out === 'object';\nreturn {\n  json: { ...src.json, doc_type: 'supplier_sheet', class_confidence: null, extracted: ok ? out : {},\n          extraction_parse_error: ok ? null : ('extraction impossible' + ($json.error ? ' : ' + $json.error : '')) },\n  binary: src.binary,\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "74a1f7ab-cefe-4fc0-a553-b2810510e542",
+      "name": "Parse Supplier Sheet",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sortie de l'Information Extractor ({ output: {...} }) + contexte de la pièce jointe\nconst src = $('Document Ready').item;\nconst out = $json.output;\nconst ok = out && typeof out === 'object';\nreturn {\n  json: { ...src.json, doc_type: 'manual', class_confidence: null, extracted: ok ? out : {},\n          extraction_parse_error: ok ? null : ('extraction impossible' + ($json.error ? ' : ' + $json.error : '')) },\n  binary: src.binary,\n};\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "63e46983-0dd8-46b7-bbfa-957b3c8644b9",
+      "name": "Parse Manual",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3560,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function toNum(v) {\n  if (v === null || v === undefined || v === '') return null;\n  if (typeof v === 'number') return Number.isFinite(v) ? v : null;\n  let s = String(v).replace(/[^\\d.,\\-]/g, '');\n  if (!s) return null;\n  const lc = s.lastIndexOf(','), ld = s.lastIndexOf('.');\n  if (lc > -1 && ld > -1) s = lc > ld ? s.replace(/\\./g, '').replace(',', '.') : s.replace(/,/g, '');\n  else if (lc > -1) s = (/,\\d{1,2}$/.test(s) && (s.match(/,/g) || []).length === 1) ? s.replace(',', '.') : s.replace(/,/g, '');\n  else if (ld > -1 && ((s.match(/\\./g) || []).length > 1 || /\\.\\d{3}$/.test(s))) s = s.replace(/\\./g, '');\n  const n = parseFloat(s);\n  return Number.isFinite(n) ? n : null;\n}\nfunction toISODate(v) {\n  if (!v) return null;\n  const s = String(v).trim();\n  let y, m, d, r;\n  if ((r = s.match(/^(\\d{4})[-\\/.](\\d{1,2})[-\\/.](\\d{1,2})/))) [y, m, d] = [r[1], r[2], r[3]];\n  else if ((r = s.match(/^(\\d{1,2})[-\\/.](\\d{1,2})[-\\/.](\\d{2,4})/))) { d = r[1]; m = r[2]; y = r[3].length === 2 ? '20' + r[3] : r[3]; }\n  else return null;\n  y = +y; m = +m; d = +d;\n  const dt = new Date(Date.UTC(y, m - 1, d));\n  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;\n  if (y < 1990 || y > 2100) return null;\n  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n}\nconst isFilled = (v) => v !== null && v !== undefined && String(v).trim() !== '' && String(v).toLowerCase() !== 'null';\n\n// Step 7 — contrôles par type ; confiance = part de contrôles réussis x confiance de classification\nconst out = [];\nconst close = (a, b) => a !== null && b !== null && Math.abs(a - b) <= Math.max(0.02, Math.abs(b) * 0.01);\n$input.all().forEach((item, i) => {\n  const j = item.json;\n  const x = j.extracted && typeof j.extracted === 'object' ? j.extracted : {};\n  const checks = [];\n  const add = (name, ok, critical, detail = '') => checks.push({ name, ok: !!ok, critical, detail });\n\n  if (j.extraction_parse_error) add('extraction_json', false, true, j.extraction_parse_error);\n\n  if (j.doc_type === 'invoice') {\n    const total = toNum(x.total), sub = toNum(x.subtotal), tax = toNum(x.tax);\n    const date = toISODate(x.date);\n    add('vendor_present', isFilled(x.vendor), true);\n    add('date_valid', !!date, true, `date=${JSON.stringify(x.date ?? null)}`);\n    add('total_positive', total !== null && total > 0, true, `total=${JSON.stringify(x.total ?? null)}`);\n    add('invoice_number_present', isFilled(x.invoice_number), false);\n    add('currency_present', isFilled(x.currency), false);\n    const lines = Array.isArray(x.line_items) ? x.line_items : [];\n    add('line_items_present', lines.length > 0, false);\n    const amounts = lines.map((li) => {\n      const a = toNum(li && li.amount);\n      if (a !== null) return a;\n      const q = toNum(li && li.quantity), u = toNum(li && li.unit_price);\n      return q !== null && u !== null ? q * u : null;\n    });\n    if (lines.length && amounts.every((a) => a !== null) && total !== null) {\n      const sum = amounts.reduce((s, a) => s + a, 0);\n      const ok = close(sum, total)\n        || (sub !== null && close(sum, sub) && (tax === null ? close(sub, total) : close(sub + tax, total)))\n        || (sub === null && tax !== null && close(sum + tax, total));\n      add('totals_consistent', ok, true,\n          `somme lignes=${sum.toFixed(2)} sous-total=${sub} taxe=${tax} total=${total}`);\n    }\n  } else if (j.doc_type === 'supplier_sheet') {\n    const c = x.contact && typeof x.contact === 'object' ? x.contact : { name: x.contact };\n    add('company_name_present', isFilled(x.company_name), true);\n    add('contact_present', isFilled(c.name) || isFilled(c.email) || isFilled(c.phone), true);\n    if (isFilled(c.email)) add('contact_email_format', /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(String(c.email).trim()), false, String(c.email));\n    add('address_present', isFilled(x.address), false);\n    add('products_present', Array.isArray(x.products_offered) && x.products_offered.length > 0, true);\n  } else if (j.doc_type === 'manual') {\n    const pc = toNum(x.page_count);\n    add('title_present', isFilled(x.title), true);\n    add('equipment_reference_present', isFilled(x.equipment_reference), true);\n    add('page_count_valid', pc !== null && Number.isInteger(pc) && pc > 0, false, `page_count=${x.page_count}`);\n    if (j.page_count_detected) add('page_count_matches_file', pc === j.page_count_detected, false,\n                                  `extrait=${pc} fichier=${j.page_count_detected}`);\n  }\n\n  const passedCount = checks.filter((c) => c.ok).length;\n  const ratio = checks.length ? passedCount / checks.length : 0;\n  const cc = typeof j.class_confidence === 'number' ? j.class_confidence : 1;\n  const confidence = Math.round(ratio * (0.5 + 0.5 * cc) * 1000) / 1000;\n  const critical_failed = checks.some((c) => c.critical && !c.ok);\n  const passed = !critical_failed && confidence >= j.cfg.auto_approve_threshold;\n  const errors = checks.filter((c) => !c.ok).map((c) => `${c.name}${c.critical ? ' [bloquant]' : ''}${c.detail ? ' — ' + c.detail : ''}`);\n  if (!critical_failed && !passed) errors.push(`confiance ${confidence} < seuil ${j.cfg.auto_approve_threshold}`);\n  out.push({ json: { ...j, confidence, validation: { passed, critical_failed, checks, errors } },\n             binary: item.binary, pairedItem: { item: i } });\n});\nreturn out;\n"
+      },
+      "id": "e6cb872e-8490-4ba9-a451-406bd2f4e805",
+      "name": "Validate Extraction",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3960,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "597bde8d-84d9-40f4-90db-ab9855980949",
+              "leftValue": "={{ $json.validation.passed }}",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              },
+              "rightValue": ""
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "2ad9fac9-987c-4ffe-bc2b-2d5ce7ca4712",
+      "name": "IF Auto-Approve",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4180,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const { text, ...rest } = $json;\nreturn { json: { ...rest, final_status: 'auto_approved', review_mode: 'auto' } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "0b8a60fc-6549-4203-9231-caeb176b4988",
+      "name": "Mark Auto-Approved",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4400,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {
+          "reset": "={{ $prevNode.name !== 'Apply Review Decision' }}"
+        }
+      },
+      "id": "db0325a2-4835-4e83-9b84-119608bfe4de",
+      "name": "Loop Review Items",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        4400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const j = $json;\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst errors = (j.validation && j.validation.errors) || [];\nconst review_html = `\n<h2>Revue requise : ${esc(j.file_name)}</h2>\n<p><b>Email :</b> ${esc(j.subject)} — ${esc(j.sender)}<br>\n<b>Type détecté :</b> ${esc(j.doc_type)} — <b>confiance :</b> ${esc(j.confidence)}<br>\n<b>Source du texte :</b> ${esc(j.text_source)}</p>\n<h3>Contrôles en échec</h3>\n<ul>${errors.map((e) => `<li>${esc(e)}</li>`).join('') || '<li>—</li>'}</ul>\n<h3>JSON extrait</h3>\n<pre style=\"background:#f4f4f4;padding:8px\">${esc(JSON.stringify(j.extracted, null, 2))}</pre>\n<p><a href=\"${$execution.resumeFormUrl}\" style=\"font-size:16px\">&#10145; Ouvrir le formulaire de validation</a></p>\n<p style=\"color:#888\">Le document original est joint à cet email.</p>`;\nreturn { json: { ...j, review_html }, binary: $input.item.binary };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "6e85541d-03e6-426a-8569-81b0da04cc08",
+      "name": "Prepare Review Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4620,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.cfg.from_email }}",
+        "toEmail": "={{ $json.cfg.review_email }}",
+        "subject": "=[Revue extraction] {{ $json.doc_type }} — {{ $json.file_name }}",
+        "emailFormat": "html",
+        "html": "={{ $json.review_html }}",
+        "options": {
+          "attachments": "data",
+          "appendAttribution": false
+        }
+      },
+      "id": "30b71e9e-d289-4652-a2cc-a2e77dd23cd7",
+      "name": "Send Review Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        4840,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "form",
+        "formTitle": "Validation d'une extraction",
+        "formDescription": "Vérifiez le JSON reçu par email puis choisissez une décision. Pour corriger, collez le JSON complet corrigé.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "decision",
+              "fieldType": "dropdown",
+              "requiredField": true,
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "approve"
+                  },
+                  {
+                    "option": "approve_with_corrections"
+                  },
+                  {
+                    "option": "reject"
+                  }
+                ]
+              }
+            },
+            {
+              "fieldLabel": "corrected_json",
+              "fieldType": "textarea",
+              "placeholder": "{\"vendor\": \"...\", \"total\": 123.45, ...}"
+            },
+            {
+              "fieldLabel": "corrected_doc_type",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "keep"
+                  },
+                  {
+                    "option": "invoice"
+                  },
+                  {
+                    "option": "supplier_sheet"
+                  },
+                  {
+                    "option": "manual"
+                  },
+                  {
+                    "option": "irrelevant"
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "limitWaitTime": true,
+        "limitType": "afterTimeInterval",
+        "resumeAmount": 24,
+        "resumeUnit": "hours",
+        "options": {}
+      },
+      "id": "cf9aae3a-a223-4ec5-a645-009e73ca5a19",
+      "name": "Wait for Human Review",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        5060,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const ctx = $('Prepare Review Message').first().json;\nconst f = $json;\nconst decision = String(f.decision || '').trim();\nlet extracted = ctx.extracted;\nlet doc_type = ctx.doc_type;\nlet final_status;\nlet review_note = '';\nif (!decision) final_status = 'review_timeout';\nelse if (decision === 'reject') final_status = 'human_rejected';\nelse {\n  final_status = 'human_approved';\n  if (decision === 'approve_with_corrections' && String(f.corrected_json || '').trim()) {\n    try { extracted = JSON.parse(f.corrected_json); final_status = 'human_corrected'; }\n    catch (e) { review_note = 'corrected_json invalide : extraction d\\'origine conservée'; }\n  }\n  if (f.corrected_doc_type && f.corrected_doc_type !== 'keep' && f.corrected_doc_type !== doc_type) {\n    doc_type = f.corrected_doc_type;\n    final_status = 'human_corrected';\n  }\n}\nconst { review_html, text, ...rest } = ctx;\nreturn { json: { ...rest, doc_type, extracted, final_status, review_mode: 'human',\n                 review_decision: decision || 'timeout', review_note } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "505a7f2a-c467-4ae1-9dad-20cf60afffce",
+      "name": "Apply Review Decision",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5280,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "function toNum(v) {\n  if (v === null || v === undefined || v === '') return null;\n  if (typeof v === 'number') return Number.isFinite(v) ? v : null;\n  let s = String(v).replace(/[^\\d.,\\-]/g, '');\n  if (!s) return null;\n  const lc = s.lastIndexOf(','), ld = s.lastIndexOf('.');\n  if (lc > -1 && ld > -1) s = lc > ld ? s.replace(/\\./g, '').replace(',', '.') : s.replace(/,/g, '');\n  else if (lc > -1) s = (/,\\d{1,2}$/.test(s) && (s.match(/,/g) || []).length === 1) ? s.replace(',', '.') : s.replace(/,/g, '');\n  else if (ld > -1 && ((s.match(/\\./g) || []).length > 1 || /\\.\\d{3}$/.test(s))) s = s.replace(/\\./g, '');\n  const n = parseFloat(s);\n  return Number.isFinite(n) ? n : null;\n}\nfunction toISODate(v) {\n  if (!v) return null;\n  const s = String(v).trim();\n  let y, m, d, r;\n  if ((r = s.match(/^(\\d{4})[-\\/.](\\d{1,2})[-\\/.](\\d{1,2})/))) [y, m, d] = [r[1], r[2], r[3]];\n  else if ((r = s.match(/^(\\d{1,2})[-\\/.](\\d{1,2})[-\\/.](\\d{2,4})/))) { d = r[1]; m = r[2]; y = r[3].length === 2 ? '20' + r[3] : r[3]; }\n  else return null;\n  y = +y; m = +m; d = +d;\n  const dt = new Date(Date.UTC(y, m - 1, d));\n  if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;\n  if (y < 1990 || y > 2100) return null;\n  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;\n}\nconst isFilled = (v) => v !== null && v !== undefined && String(v).trim() !== '' && String(v).toLowerCase() !== 'null';\n\n// Step 9 / 10 : pour chaque pièce jointe, la ligne métier (si approuvée) + sa ligne processing_log.\n// Sortie « à plat » = colonnes de la table métier ; _target et _log sont ignorés par le nœud Supabase.\nconst APPROVED = ['auto_approved', 'human_approved', 'human_corrected'];\nconst TABLE = { invoice: 'invoices', supplier_sheet: 'suppliers', manual: 'documents' };\nconst str = (v) => (isFilled(v) ? (typeof v === 'object' ? JSON.stringify(v) : String(v)) : null);\n\nfunction businessRecord(t, x, j) {\n  const base = { attachment_id: j.attachment_id, email_id: j.email_id, source_file: j.file_name, raw: x };\n  if (t === 'invoice') return { ...base,\n    vendor: str(x.vendor), invoice_number: str(x.invoice_number), invoice_date: toISODate(x.date),\n    subtotal: toNum(x.subtotal), tax: toNum(x.tax), total: toNum(x.total), currency: str(x.currency),\n    line_items: Array.isArray(x.line_items) ? x.line_items : [] };\n  if (t === 'supplier_sheet') return { ...base,\n    company_name: str(x.company_name), contact: x.contact ?? null, address: str(x.address),\n    products_offered: Array.isArray(x.products_offered) ? x.products_offered : [] };\n  const pc = toNum(x.page_count);\n  return { ...base, doc_kind: 'manual',\n    title: str(x.title), equipment_reference: str(x.equipment_reference),\n    page_count: pc !== null ? Math.round(pc) : null, summary: str(x.summary),\n    content_text: (j.text || '').slice(0, 100000) || null };\n}\n\nreturn $input.all().map((item, i) => {\n  const j = item.json;\n  const x = j.extracted && typeof j.extracted === 'object' ? j.extracted : {};\n  const target = APPROVED.includes(j.final_status) ? (TABLE[j.doc_type] || null) : null;\n  const _log = {\n    attachment_id: j.attachment_id, email_id: j.email_id,\n    test_case_id: j.test_case_id ?? null, test_run_id: j.test_run_id ?? null,\n    file_name: j.file_name, mime_type: j.mime_type, text_source: j.text_source || null,\n    detected_type: j.doc_type || null, class_confidence: toNum(j.class_confidence), confidence: toNum(j.confidence),\n    validation_passed: j.validation ? !!j.validation.passed : null,\n    validation_errors: (j.validation && j.validation.errors) || [],\n    final_status: j.final_status, review_mode: j.review_mode || 'none', extracted: x,\n  };\n  const record = target ? businessRecord(j.doc_type, x, j) : {};\n  return { json: { ...record, _target: target || 'none', _log }, pairedItem: { item: i } };\n});\n"
+      },
+      "id": "cb1bb679-985a-4eed-90a0-baaa70c79eca",
+      "name": "Prepare Records",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4840,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "de0d1561-55b7-4513-b252-d9e987b67d6b",
+                    "leftValue": "={{ $json._target }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "invoices"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "invoices"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "ff281fd9-76c9-4c4a-8b4e-b6f2bf2da52a",
+                    "leftValue": "={{ $json._target }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "suppliers"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "suppliers"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "57d918fe-15d9-44e1-9e24-d7616856de57",
+                    "leftValue": "={{ $json._target }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "documents"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "documents"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "loose"
+                },
+                "conditions": [
+                  {
+                    "id": "95ade093-6c62-4d27-bc43-d5d1f50dafd1",
+                    "leftValue": "={{ $json._target }}",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    },
+                    "rightValue": "none"
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "none"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "3839aea8-ec69-4a05-8c79-4835f7aec38b",
+      "name": "Route by Table",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3,
+      "position": [
+        5060,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "invoices",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": "_target,_log"
+      },
+      "id": "50128f5c-94c5-45fb-9dae-772c86d9e580",
+      "name": "Supabase: invoices",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        5300,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "suppliers",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": "_target,_log"
+      },
+      "id": "ac40b844-37c8-4a00-b197-88b589fa0d26",
+      "name": "Supabase: suppliers",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        5300,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "documents",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": "_target,_log"
+      },
+      "id": "a63b91a8-0e00-48f1-9958-af39885f93a5",
+      "name": "Supabase: documents",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        5300,
+        240
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Step 10 : ligne processing_log, reliée à la ligne métier créée (id renvoyé par Supabase)\nconst p = $('Prepare Records').item.json;\nconst saved = p._target !== 'none';\nreturn { json: { ...p._log, target_table: saved ? p._target : null, record_id: saved ? $json.id : null } };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "97a16baa-4039-4011-abdd-7740db7bfff4",
+      "name": "Build Log Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        5540,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "processing_log",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": ""
+      },
+      "id": "4a2241c8-3b9b-4e52-a8d2-7e5f8af8aff3",
+      "name": "Supabase: processing_log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        5760,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Steps 1-2 : réception + filtre (Text Classifier)\nPas de pièce jointe ⇒ toujours *skipped*",
+        "width": 1060,
+        "height": 640,
+        "color": 7
+      },
+      "id": "10b9f52f-0619-4dfd-b7fc-c552f9dd6f00",
+      "name": "Note e148fb",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Steps 3-4 : 1 item par pièce jointe, texte PDF ou OCR",
+        "width": 1540,
+        "height": 860,
+        "color": 7
+      },
+      "id": "09518571-e5e5-4854-84e8-833f7a05aedb",
+      "name": "Note 1f33e5",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1060,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Steps 5-6 : Text Classifier (1 sortie par type) puis Information Extractor (1 schéma par type)",
+        "width": 1140,
+        "height": 1040,
+        "color": 7
+      },
+      "id": "54f768bc-d76a-468f-b3bd-b4662ec8f704",
+      "name": "Note e21958",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        -280
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Steps 7-9 : validation, auto-approbation ou revue humaine (1 par 1)",
+        "width": 1760,
+        "height": 860,
+        "color": 7
+      },
+      "id": "00e78b3f-13f4-42df-9bf6-f5c79d671652",
+      "name": "Note 8a848d",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        3720,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Steps 9-10 : enregistrement Supabase\nLigne métier (invoices / suppliers / documents) puis processing_log avec record_id",
+        "width": 1180,
+        "height": 700,
+        "color": 7
+      },
+      "id": "0831a05b-3909-4588-b0b5-d83c432ec3ca",
+      "name": "Note d7b34e",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4800,
+        -240
+      ]
+    }
+  ],
+  "connections": {
+    "Email Trigger (IMAP)": {
+      "main": [
+        [
+          {
+            "node": "Config and Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config and Normalize": {
+      "main": [
+        [
+          {
+            "node": "Relevance Filter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Skipped": {
+      "main": [
+        [
+          {
+            "node": "Supabase: email_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Attachments": {
+      "main": [
+        [
+          {
+            "node": "Switch File Kind",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract PDF Text": {
+      "main": [
+        [
+          {
+            "node": "Check Text Layer",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Text Layer": {
+      "main": [
+        [
+          {
+            "node": "IF Needs OCR",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "OCR Service": {
+      "main": [
+        [
+          {
+            "node": "Attach OCR Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach OCR Text": {
+      "main": [
+        [
+          {
+            "node": "Document Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Read Text File": {
+      "main": [
+        [
+          {
+            "node": "Document Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Unsupported": {
+      "main": [
+        [
+          {
+            "node": "Prepare Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Document Ready": {
+      "main": [
+        [
+          {
+            "node": "Classify Document",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Invoice": {
+      "main": [
+        [
+          {
+            "node": "Parse Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Supplier Sheet": {
+      "main": [
+        [
+          {
+            "node": "Parse Supplier Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Manual": {
+      "main": [
+        [
+          {
+            "node": "Parse Manual",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Invoice": {
+      "main": [
+        [
+          {
+            "node": "Validate Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Supplier Sheet": {
+      "main": [
+        [
+          {
+            "node": "Validate Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Manual": {
+      "main": [
+        [
+          {
+            "node": "Validate Extraction",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Discarded": {
+      "main": [
+        [
+          {
+            "node": "Prepare Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Unclassified": {
+      "main": [
+        [
+          {
+            "node": "Loop Review Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Extraction": {
+      "main": [
+        [
+          {
+            "node": "IF Auto-Approve",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Auto-Approved": {
+      "main": [
+        [
+          {
+            "node": "Prepare Records",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Review Message": {
+      "main": [
+        [
+          {
+            "node": "Send Review Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Review Email": {
+      "main": [
+        [
+          {
+            "node": "Wait for Human Review",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Human Review": {
+      "main": [
+        [
+          {
+            "node": "Apply Review Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Apply Review Decision": {
+      "main": [
+        [
+          {
+            "node": "Loop Review Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Records": {
+      "main": [
+        [
+          {
+            "node": "Route by Table",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase: invoices": {
+      "main": [
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase: suppliers": {
+      "main": [
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Supabase: documents": {
+      "main": [
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Log Row": {
+      "main": [
+        [
+          {
+            "node": "Supabase: processing_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Relevance Filter": {
+      "main": [
+        [
+          {
+            "node": "IF Has Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF Has Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Has Attachments": {
+      "main": [
+        [
+          {
+            "node": "Split Attachments",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Skipped",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch File Kind": {
+      "main": [
+        [
+          {
+            "node": "Extract PDF Text",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "OCR Service",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Read Text File",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Unsupported",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Needs OCR": {
+      "main": [
+        [
+          {
+            "node": "OCR Service",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Document Ready",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classify Document": {
+      "main": [
+        [
+          {
+            "node": "Extract Invoice",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Supplier Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract Manual",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Discarded",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Mark Unclassified",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF Auto-Approve": {
+      "main": [
+        [
+          {
+            "node": "Mark Auto-Approved",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Loop Review Items",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Review Items": {
+      "main": [
+        [
+          {
+            "node": "Prepare Records",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Prepare Review Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Table": {
+      "main": [
+        [
+          {
+            "node": "Supabase: invoices",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase: suppliers",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Supabase: documents",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Log Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Model - Filter": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Relevance Filter",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Model - Classify": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Classify Document",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Groq Model - Extract": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "Extract Invoice",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Extract Supplier Sheet",
+            "type": "ai_languageModel",
+            "index": 0
+          },
+          {
+            "node": "Extract Manual",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "errorWorkflow": "docExtractErr001"
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": false
+  }
+}

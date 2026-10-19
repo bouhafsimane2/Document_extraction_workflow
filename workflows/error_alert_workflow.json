@@ -1,0 +1,144 @@
+{
+  "id": "docExtractErr001",
+  "name": "Document Extraction - Error Alert",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "5befc201-a57f-4f0b-b326-5a8e5de50b80",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const e = $json.execution || {};\nconst w = $json.workflow || {};\nconst message = (e.error && (e.error.message || e.error.description)) || 'Erreur inconnue';\nreturn { json: {\n  workflow_name: w.name || null,\n  execution_id: e.id ? String(e.id) : null,\n  execution_url: e.url || null,\n  last_node: e.lastNodeExecuted || null,\n  error_message: message,\n  html: `<h2>&#9888; Échec du workflow « ${w.name} »</h2><p><b>Nœud :</b> ${e.lastNodeExecuted}<br><b>Erreur :</b> ${message}</p>` +\n        (e.url ? `<p><a href=\"${e.url}\">Voir l'exécution</a></p>` : '') +\n        '<p>Le document concerné n\\'a PAS été enregistré : relancer l\\'exécution après correction.</p>',\n} };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c1adad33-1dd5-4247-8cbf-303347f9a069",
+      "name": "Format Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return { json: {\n  workflow_name: $json.workflow_name, execution_id: $json.execution_id,\n  execution_url: $json.execution_url, last_node: $json.last_node, error_message: $json.error_message,\n} };\n",
+        "mode": "runOnceForEachItem"
+      },
+      "id": "c5daadf1-dd03-4df1-9b7e-18e6e83efc71",
+      "name": "Error Log Row",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "row",
+        "operation": "create",
+        "tableId": "error_log",
+        "dataToSend": "autoMapInputData",
+        "inputsToIgnore": ""
+      },
+      "id": "ae40fc21-131f-41cc-88ed-291235e13a08",
+      "name": "Supabase: error_log",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        680,
+        80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "n8n-extraction@test.local",
+        "toEmail": "review@test.local",
+        "subject": "=[ALERTE n8n] {{ $json.workflow_name }} — échec sur {{ $json.last_node }}",
+        "emailFormat": "html",
+        "html": "={{ $json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "c53a1f49-66f6-4b3f-9594-3bca18073311",
+      "name": "Send Alert Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        460,
+        320
+      ]
+    },
+    {
+      "parameters": {
+        "content": "### Step 11 — Alerte d'erreur\nSélectionner ce workflow dans *Settings → Error workflow* du workflow principal. Remplacer *Send Alert Email* par un nœud Slack si besoin.",
+        "width": 520,
+        "height": 200,
+        "color": 7
+      },
+      "id": "880cc912-0680-42d1-a647-01bd03fee085",
+      "name": "Note 3b8013",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -40,
+        -60
+      ]
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Alert": {
+      "main": [
+        [
+          {
+            "node": "Error Log Row",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Send Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Log Row": {
+      "main": [
+        [
+          {
+            "node": "Supabase: error_log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}

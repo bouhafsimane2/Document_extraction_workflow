@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Fichiers générés
+workflows/_code_check/
+reports/*
+!reports/headless-test.md
+
+# Jeu de données : régénéré par les scripts (les images SROIE / CORD ne doivent pas être redistribuées)
+data/

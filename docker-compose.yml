@@ -1,0 +1,75 @@
+# Pipeline d'extraction de documents — tout le projet en conteneurs.
+#
+#   cp .env.example .env            (puis remplir N8N_ENCRYPTION_KEY)
+#   docker compose up -d --build    -> n8n http://localhost:5678 + service OCR Docling
+#   docker compose --profile test-mail up -d   -> ajoute la boîte mail de test (GreenMail + Mailpit)
+#
+# La base de données (Supabase) et le LLM (Groq) sont des services en ligne : rien à lancer ici.
+services:
+  # ---------------------------------------------------------------- n8n
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION:-2.18.5}
+    restart: unless-stopped
+    ports:
+      - "${N8N_HOST_PORT:-5678}:5678"
+    environment:
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY:?Définir N8N_ENCRYPTION_KEY dans .env}
+      - GENERIC_TIMEZONE=${TIMEZONE:-Africa/Algiers}
+      - TZ=${TIMEZONE:-Africa/Algiers}
+      # URL publique de n8n : utilisée dans les liens du formulaire de revue humaine
+      - WEBHOOK_URL=${N8N_PUBLIC_URL:-http://localhost:5678/}
+      - N8N_DIAGNOSTICS_ENABLED=false
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./workflows:/workflows:ro
+    # Au 1er démarrage seulement : importe les 2 workflows, en pointant l'OCR sur le conteneur "ocr".
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ ! -f /home/node/.n8n/.workflows_imported ]; then
+          mkdir -p /tmp/wf
+          for f in /workflows/*.json; do
+            sed 's#http://127.0.0.1:8001/ocr#http://ocr:8001/ocr#' "$$f" > "/tmp/wf/$$(basename "$$f")"
+          done
+          n8n import:workflow --separate --input=/tmp/wf && touch /home/node/.n8n/.workflows_imported
+        fi
+        exec n8n start
+    depends_on:
+      ocr:
+        condition: service_healthy
+
+  # ---------------------------------------------------------------- OCR (Docling)
+  ocr:
+    build: ./ocr_service
+    restart: unless-stopped
+    environment:
+      - OCR_ENGINE=${OCR_ENGINE:-docling}
+    ports:
+      - "127.0.0.1:8001:8001"      # accessible depuis le PC (scripts, /health), pas depuis le réseau
+    volumes:
+      - ocr_models:/models          # modèles téléchargés une seule fois
+
+  # ---------------------------------------------------------------- boîte mail de test (optionnelle)
+  greenmail:                        # boîte de réception de test : SMTP 3025 (envoi des tests), IMAP 3143 (lue par n8n)
+    image: greenmail/standalone:2.1.3
+    profiles: ["test-mail"]
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap
+        -Dgreenmail.hostname=0.0.0.0
+        -Dgreenmail.users=inbox:inbox@test.local
+        -Dgreenmail.users.login=email
+    ports:
+      - "3025:3025"
+      - "3143:3143"
+
+  mailpit:                          # capture les emails envoyés par n8n (revue, alertes) : http://localhost:8025
+    image: axllent/mailpit:latest
+    profiles: ["test-mail"]
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+volumes:
+  n8n_data:
+  ocr_models:
